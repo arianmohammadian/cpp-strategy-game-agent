@@ -1,708 +1,372 @@
-#include "Player.hh"
 #include <algorithm>
+#include <queue>
+#include <vector>
+
+#include "Player.hh"
+
+using std::queue;
+using std::vector;
 
 #define PLAYER_NAME Mauricio27_0
 
-
+// Autonomous agent for the original university strategy game.
+// The decision priorities, direction order and tie-breaking rules are preserved.
 struct Mauricio27_0 : public Player {
+    static Player* factory() { return new Mauricio27_0; }
 
-  static Player* factory () {
-    return new Mauricio27_0;
-  }
+    using DistanceMap = vector<vector<int>>;
 
+    const vector<Dir> DIRS = {Up, Down, Left, Right};
 
-  // ATRIBUTS
-  const vector<Dir> DIRS = {Up, Down, Left, Right};
+    DistanceMap dist_a_diners;
+    DistanceMap dist_a_health_kits;
+    DistanceMap dist_a_poison_kits;
+    DistanceMap dist_a_caixes;
+    DistanceMap dist_soldats_enemics;
 
-  vector<vector<int>> dist_a_diners;
-  vector<vector<int>> dist_a_health_kits;
-  vector<vector<int>> dist_a_poison_kits;
+    enum class Objective { Money, HealthKit, PoisonKit, Box };
 
-  vector<vector<int>> dist_a_caixes;
-  vector<vector<int>> dist_soldats_enemics;
+    // Navigation and board information.
+    bool cella_accessible(const Pos& p);
+    bool is_objective(const Pos& p, Objective objective);
+    DistanceMap bfs_multi(const vector<Pos>& sources);
+    DistanceMap bfs_to_objective(Objective objective);
+    DistanceMap bfs_to_enemy_soldiers();
+    void computar_info_global();
 
+    // Attempts one strict improvement in a distance map. The optional checks
+    // preserve the original movement rules for each unit and priority.
+    bool move_closer(int id, const Pos& p, const DistanceMap& distances,
+                     int starting_distance, bool require_empty,
+                     bool avoid_adjacent_enemy);
 
-  // DECLARACIONS DE FUNCIONS
-  // Helpers moviment
-  bool cella_accessible(const Pos& p);
+    // Safety-box puzzle.
+    bool valida(int a, int b, int c);
+    bool backtrack(const vector<int>& v, vector<int>& sol, int trip_id);
+    vector<int> solve_tripletes(const vector<int>& v);
 
-  // MULTI BFS (bfs per totes les cel·les)
-  // Professor
-  vector<vector<int>> bfs_multi_caixes();
-  vector<vector<int>> bfs_multi_enemy_soldiers();
+    // Decisions, in the same priority order as the submitted agent.
+    void play_professor();
+    void play_soldiers();
+    void play_soldier(int id);
+    bool attack_adjacent(int id, const Pos& p, bool professor_only,
+                         bool weak_professor_only);
+    bool collect_adjacent(int id, const Pos& p);
+    bool early_soldier_strategy(int id, const Unit& soldier);
+    bool farmer_strategy(int id, const Unit& soldier);
+    bool poisoner_strategy(int id, const Unit& soldier);
+    bool attacker_strategy(int id, const Unit& soldier);
 
-  // Soldats
-  vector<vector<int>> bfs_from_multi_pos_money();
-  vector<vector<int>> bfs_multi_vida();
-  vector<vector<int>> bfs_multi_veri();
-
-  // Obertura de caixes
-  bool valida(int a, int b, int c);
-  bool backtrack(const vector<int>& v, vector<int>& sol, int trip_id);
-  vector<int> solve_tripletes(const vector<int>& v);
-
-  // Logica de joc
-  void computar_info_global();
-  void play_professor();
-  void play_soldiers();
-  void play_soldier(int id);
-
-  // PLAY
-  virtual void play () {
-    if (status(me()) >= 0.9) return;
-
-    vector<int> s = soldiers(me());
-
-    /* Write debugging info about my units
-    cerr << "At round " << round() << " player " << me() << " has " << s.size() << " soldiers: ";
-    for (auto id : s) 
-      cerr << id << " at pos " << unit(id).pos << "; ";
-    cerr << endl; */
-
-    computar_info_global();
-    play_professor();
-    play_soldiers();
-  }
+    void play() override {
+        if (status(me()) >= 0.9) return;
+        // Retain the original soldiers() query before planning the turn.
+        vector<int> s = soldiers(me());
+        (void)s;
+        computar_info_global();
+        play_professor();
+        play_soldiers();
+    }
 };
 
+// -----------------------------------------------------------------------------
+// Navigation
+// -----------------------------------------------------------------------------
 
-// IMPLEMENTACIONS
-// Play professor
+bool Mauricio27_0::cella_accessible(const Pos& p) {
+    if (!pos_ok(p)) return false;
+    return cell(p).type != Wall;
+}
+
+bool Mauricio27_0::is_objective(const Pos& p, Objective objective) {
+    const Cell& c = cell(p);
+    switch (objective) {
+        case Objective::Money:     return c.money > 0;
+        case Objective::HealthKit: return c.health_kit;
+        case Objective::PoisonKit: return c.poison_kit;
+        case Objective::Box:       return c.box != -1;
+    }
+    return false;
+}
+
+Mauricio27_0::DistanceMap Mauricio27_0::bfs_multi(const vector<Pos>& sources) {
+    DistanceMap dist(board_rows(), vector<int>(board_cols(), -1));
+    queue<Pos> q;
+
+    for (const Pos& p : sources) {
+        dist[p.i][p.j] = 0;
+        q.push(p);
+    }
+
+    while (!q.empty()) {
+        Pos p = q.front();
+        q.pop();
+
+        for (Dir d : DIRS) {
+            Pos next = p + d;
+            if (!pos_ok(next)) continue;
+            if (!cella_accessible(next)) continue;
+            if (dist[next.i][next.j] != -1) continue;
+
+            dist[next.i][next.j] = dist[p.i][p.j] + 1;
+            q.push(next);
+        }
+    }
+    return dist;
+}
+
+Mauricio27_0::DistanceMap Mauricio27_0::bfs_to_objective(Objective objective) {
+    vector<Pos> sources;
+    for (int i = 0; i < board_rows(); ++i) {
+        for (int j = 0; j < board_cols(); ++j) {
+            Pos p(i, j);
+            if (is_objective(p, objective)) sources.push_back(p);
+        }
+    }
+    return bfs_multi(sources);
+}
+
+Mauricio27_0::DistanceMap Mauricio27_0::bfs_to_enemy_soldiers() {
+    vector<Pos> sources;
+    // Only enemies carrying poison are threats to the professor.
+    for (int player = 0; player < num_players(); ++player) {
+        if (player == me()) continue;
+        for (int id : soldiers(player)) {
+            const Unit& enemy = unit(id);
+            if (enemy.poison > 0) sources.push_back(enemy.pos);
+        }
+    }
+    return bfs_multi(sources);
+}
+
+void Mauricio27_0::computar_info_global() {
+    dist_a_diners = bfs_to_objective(Objective::Money);
+    dist_a_health_kits = bfs_to_objective(Objective::HealthKit);
+    dist_a_poison_kits = bfs_to_objective(Objective::PoisonKit);
+    dist_a_caixes = bfs_to_objective(Objective::Box);
+    dist_soldats_enemics = bfs_to_enemy_soldiers();
+}
+
+bool Mauricio27_0::move_closer(int id, const Pos& p, const DistanceMap& distances,
+                               int starting_distance, bool require_empty,
+                               bool avoid_adjacent_enemy) {
+    bool found = false;
+    int best = starting_distance;
+    Dir best_direction = Down;
+
+    for (Dir d : DIRS) {
+        Pos next = p + d;
+        if (!pos_ok(next)) continue;
+        if (!cella_accessible(next)) continue;
+        if (require_empty && cell(next).id != -1) continue;
+
+        int distance = distances[next.i][next.j];
+        if (distance == -1) continue;
+
+        if (avoid_adjacent_enemy) {
+            int enemy_distance = dist_soldats_enemics[next.i][next.j];
+            if (enemy_distance != -1 && enemy_distance <= 1) continue;
+        }
+
+        if (distance < best) {
+            best = distance;
+            best_direction = d;
+            found = true;
+        }
+    }
+
+    if (found) move(id, best_direction);
+    return found;
+}
+
+// -----------------------------------------------------------------------------
+// Professor: open box, heal, seek safe box, seek box, collect adjacent money.
+// -----------------------------------------------------------------------------
+
 void Mauricio27_0::play_professor() {
-    int pid = professor(me());  
-    if (pid == -1) {
-        return;   
-    }    
-
+    int pid = professor(me());
+    if (pid == -1) return;
     Pos p = unit(pid).pos;
 
-    // Seguim ordre de prioritats (estrategia)
-
-    // Prioritat 0: Obrir caixa si adjacent a una
+    // 0. Open an adjacent safety box.
     for (Dir d : DIRS) {
-        Pos q = p + d;
-        if (pos_ok(q) and cell(q).box != -1) {
-
-            int box_id = cell(q).box;
-            vector<int> hints = safety_box_hints(box_id);
-            vector<int> sol = solve_tripletes(hints);
-
-            open(pid, sol, d);
+        Pos next = p + d;
+        if (pos_ok(next) && cell(next).box != -1) {
+            vector<int> hints = safety_box_hints(cell(next).box);
+            open(pid, solve_tripletes(hints), d);
             return;
         }
     }
 
-    // Prioritat 1: Curarme si estic baix de vida i hi ha vida al pot 
-    // (no val la pena arriscar)
-    if(unit(pid).health <= 40 && available_health(me()) > 0) {
+    // 1. Heal when health is low and shared healing is available.
+    if (unit(pid).health <= 40 && available_health(me()) > 0) {
         heal(pid);
         return;
     }
 
-    // Prioritat 2: Anar a la caixa mes propera evitant enemics propers
-    int d_here = dist_a_caixes[p.i][p.j];
+    // 2. Approach a box without entering a cell next to an armed enemy.
+    int current_distance = dist_a_caixes[p.i][p.j];
+    if (current_distance == 0 && cell(p).box == -1) current_distance = 999999;
+    if (current_distance != -1 &&
+        move_closer(pid, p, dist_a_caixes, current_distance, false, true)) return;
 
-    if(d_here == 0 && cell(p).box == -1) {
-        d_here = 999999;   
-    }
+    // 3. Approach a box even if the safer route is blocked.
+    current_distance = dist_a_caixes[p.i][p.j];
+    if (current_distance != -1 &&
+        move_closer(pid, p, dist_a_caixes, current_distance, false, false)) return;
 
-    if (d_here != -1) {
-        Dir millorDist = Up;
-        int millorDist_valor = d_here;
-        bool trobat = false;
-
-        for (Dir d : DIRS) {
-            Pos q = p + d;
-
-            if (!pos_ok(q)) continue;
-            if (!cella_accessible(q)) continue;
-
-            int db = dist_a_caixes[q.i][q.j];
-            if (db == -1) continue;   
-
-            // Evitar enemics
-            int de = dist_soldats_enemics[q.i][q.j];
-            if (de != -1 && de <= 1) continue;  
-
-            if (db < millorDist_valor) {
-                millorDist_valor = db;
-                millorDist = d;
-                trobat = true;
-            }
-        }
-
-        if (trobat) {
-            move(pid, millorDist);
-            return;
-        }
-    }
-
-    // Prioritat 3: Anar a la caixa mes propera si totes les direccions son perilloses
-    if (dist_a_caixes[p.i][p.j] != -1) {
-        bool trobat = false;
-        int best = dist_a_caixes[p.i][p.j];
-        Dir millorDist;
-
-        for (Dir d : DIRS) {
-            Pos q = p + d;
-            if (!pos_ok(q)) continue;
-            if (!cella_accessible(q)) continue;
-
-            if (dist_a_caixes[q.i][q.j] != -1 && dist_a_caixes[q.i][q.j] < best) {
-                best = dist_a_caixes[q.i][q.j];
-                millorDist = d;
-                trobat = true;
-            }
-        }
-
-        if(trobat) {
-            move(pid, millorDist);
-            return;
-        }
-    }
-
-
-    // Prioritat 5: Diners adjacents
+    // 4. Collect adjacent money.
     for (Dir d : DIRS) {
-        Pos q = p + d;
-        if (pos_ok(q) and cell(q).money > 0) {
+        Pos next = p + d;
+        if (pos_ok(next) && cell(next).money > 0) {
             move(pid, d);
             return;
         }
     }
 }
 
-// Play tots els soldats
+// -----------------------------------------------------------------------------
+// Soldiers: immediate combat and pickups, then early or role-based strategy.
+// -----------------------------------------------------------------------------
+
+bool Mauricio27_0::attack_adjacent(int id, const Pos& p, bool professor_only,
+                                   bool weak_professor_only) {
+    for (Dir d : DIRS) {
+        Pos next = p + d;
+        if (!pos_ok(next)) continue;
+        const Cell& c = cell(next);
+        if (c.id == -1) continue;
+
+        const Unit& enemy = unit(c.id);
+        if (enemy.player == me()) continue;
+        if (professor_only && enemy.type != Professor) continue;
+        if (!professor_only && enemy.type != Soldier) continue;
+        if (weak_professor_only && enemy.health > 20) continue;
+
+        move(id, d);
+        return true;
+    }
+    return false;
+}
+
+bool Mauricio27_0::collect_adjacent(int id, const Pos& p) {
+    for (Dir d : DIRS) {
+        Pos next = p + d;
+        if (!pos_ok(next)) continue;
+        const Cell& c = cell(next);
+        if ((c.money > 0 || c.gold || c.health_kit || c.poison_kit) && c.type != Wall) {
+            move(id, d);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Mauricio27_0::early_soldier_strategy(int id, const Unit& soldier) {
+    const Pos& p = soldier.pos;
+    if (soldier.poison == 0 && available_poison(me()) > 0) {
+        charge(id);
+        return true;
+    }
+
+    // Seek money only when strictly closer than ten steps.
+    int money_distance = dist_a_diners[p.i][p.j];
+    if (money_distance != -1 && money_distance < 10 &&
+        move_closer(id, p, dist_a_diners, money_distance, true, false)) return true;
+
+    if (soldier.poison == 0) {
+        int poison_distance = dist_a_poison_kits[p.i][p.j];
+        if (poison_distance != -1 &&
+            move_closer(id, p, dist_a_poison_kits, poison_distance, true, false)) return true;
+    }
+    return false;
+}
+
+bool Mauricio27_0::farmer_strategy(int id, const Unit& soldier) {
+    const Pos& p = soldier.pos;
+    int distance = dist_a_diners[p.i][p.j];
+    return distance != -1 && move_closer(id, p, dist_a_diners, distance, true, false);
+}
+
+bool Mauricio27_0::poisoner_strategy(int id, const Unit& soldier) {
+    const Pos& p = soldier.pos;
+    if (soldier.poison < soldier_max_poisons() && available_poison(me()) > 0) {
+        charge(id);
+        return true;
+    }
+
+    int poison_distance = dist_a_poison_kits[p.i][p.j];
+    if (poison_distance != -1 &&
+        move_closer(id, p, dist_a_poison_kits, poison_distance, true, false)) return true;
+
+    int enemy_distance = dist_soldats_enemics[p.i][p.j];
+    return enemy_distance > 0 &&
+           move_closer(id, p, dist_soldats_enemics, enemy_distance, true, false);
+}
+
+bool Mauricio27_0::attacker_strategy(int id, const Unit& soldier) {
+    const Pos& p = soldier.pos;
+    if (soldier.poison == 0 && available_poison(me()) > 0) {
+        charge(id);
+        return true;
+    }
+
+    if (soldier.poison == 0) {
+        int poison_distance = dist_a_poison_kits[p.i][p.j];
+        if (poison_distance != -1 &&
+            move_closer(id, p, dist_a_poison_kits, poison_distance, true, false)) return true;
+    }
+
+    int enemy_distance = dist_soldats_enemics[p.i][p.j];
+    if (enemy_distance > 0 &&
+        move_closer(id, p, dist_soldats_enemics, enemy_distance, true, false)) return true;
+
+    int money_distance = dist_a_diners[p.i][p.j];
+    return money_distance != -1 &&
+           move_closer(id, p, dist_a_diners, money_distance, true, false);
+}
+
+void Mauricio27_0::play_soldier(int id) {
+    Unit soldier = unit(id);
+    const Pos& p = soldier.pos;
+
+    // 0. Attack: weak professors, soldiers, then any professor.
+    if (soldier.poison > 0) {
+        if (attack_adjacent(id, p, true, true)) return;
+        if (attack_adjacent(id, p, false, false)) return;
+        if (attack_adjacent(id, p, true, false)) return;
+    }
+
+    // 1. Pick up any adjacent resource.
+    if (collect_adjacent(id, p)) return;
+
+    // 2. During early rounds, attempt the shared strategy first.
+    // The original agent also falls through to roles in these rounds.
+    if (round() < 100 && early_soldier_strategy(id, soldier)) return;
+
+    // 3. Roles, also used as fallback before round 100.
+    switch (id % 3) {
+        case 0: farmer_strategy(id, soldier); break;
+        case 1: poisoner_strategy(id, soldier); break;
+        default: attacker_strategy(id, soldier); break;
+    }
+}
+
 void Mauricio27_0::play_soldiers() {
     vector<int> my_soldiers = soldiers(me());
-    for(int id : my_soldiers) play_soldier(id);
+    for (int id : my_soldiers) play_soldier(id);
 }
 
-// Play soldat individual
-void Mauricio27_0::play_soldier(int id) {
-    Unit me_u = unit(id);
+// -----------------------------------------------------------------------------
+// Safety-box triplets: identical search and backtracking order.
+// -----------------------------------------------------------------------------
 
-
-    Pos p = me_u.pos;
-
-    // Prioritat 0: Atac adjacent si tinc veri
-    if (me_u.poison > 0) {
-        // Primer intentem matar professors (health <= 20)
-        for (Dir d : DIRS) {
-            Pos q = p + d;
-            if (!pos_ok(q)) continue;
-            const Cell& c =   cell(q);
-            if (c.id == -1) continue;
-
-            const Unit& u = unit(c.id);
-            if (u.player == me()) continue;
-
-            if (u.type == Professor and u.health <= 20) {
-                move(id, d);  
-                return;
-            }
-        }
-
-        // Després, soldats enemics adjacents
-        for (Dir d : DIRS) {
-            Pos q = p + d;
-            if (!pos_ok(q)) continue;
-            const Cell& c = cell(q);
-            if (c.id == -1) continue;
-
-            const Unit& u = unit(c.id);
-            if (u.player == me()) continue;
-
-            if (u.type == Soldier) {
-                move(id, d);   
-                return;
-            }
-        }
-
-        // Finalment, ataquem a professors si adjacents pero tenen health >= 20 
-
-        for (Dir d : DIRS) {
-            Pos q = p + d;
-            if (!pos_ok(q)) continue;
-            const Cell& c = cell(q);
-            if (c.id == -1) continue;
-
-            const Unit& u = unit(c.id);
-            if (u.player == me()) continue;
-
-            if (u.type == Professor) {
-                move(id, d);  
-                return;
-            }
-        }
-    }
-
-    // Recollir diners o kits adjacents
-    for (Dir d : DIRS) {
-        Pos q = p + d;
-        if (!pos_ok(q)) continue;
-        const Cell& c = cell(q);
-
-        // diners, or, kits de vida o verí
-        if (c.money > 0 || c.gold || c.health_kit || c.poison_kit) {
-            if (c.type != Wall) {
-                move(id, d);
-                return;
-            }
-        }
-    }
-
-    // Per fer: Refinar estrategia
-
-    // Estrategia a (fins a ronda 100)
-    if (round() < 100) {
-        // 1) si no tinc verí però en queda al pot, em carrego
-        if (me_u.poison == 0 && available_poison(me()) > 0) {
-            charge(id);
-            return;
-        }
-
-        // 2) anar cap a diners amb BFS múltiple si estan aprop <= 10 passos
-        if (dist_a_diners[p.i][p.j] != -1) {
-            int best = dist_a_diners[p.i][p.j];
-            if(best < 10) {
-                bool trobat = false;
-                Dir millorDist = Down;
-                
-
-                for (Dir d : DIRS) {
-                    Pos q = p + d;
-                    if (!pos_ok(q)) continue;
-                    if (!cella_accessible(q)) continue;
-
-                    if (cell(q).id != -1) continue;
-
-                    int dm = dist_a_diners[q.i][q.j];
-                    if (dm != -1 && dm < best) {
-                        best = dm;
-                        millorDist = d;
-                        trobat = true;
-                    }
-                }
-
-                if (trobat) {
-                    move(id, millorDist);
-                    return;
-                }
-            }
-        }
-
-        // 3) anar a poison kits
-        if (me_u.poison == 0 && dist_a_poison_kits[p.i][p.j] != -1) {
-            int best = dist_a_poison_kits[p.i][p.j];
-            Dir millorDist = Down;
-            bool trobat = false;
-
-            for (Dir d : DIRS) {
-                Pos q = p + d;
-                if (!pos_ok(q)) continue;
-                if (!cella_accessible(q)) continue;
-                if (cell(q).id != -1) continue;
-
-                int dp = dist_a_poison_kits[q.i][q.j];
-                if (dp != -1 && dp < best) {
-                    best = dp;
-                    millorDist = d;
-                    trobat = true;
-                }
-            }
-
-            if (trobat) {
-                move(id, millorDist);
-                return;
-            }
-        }
-    }
-
-    // Estrategia b (a partir de ronda 100 -> rols)
-    /* Aqui implemento la part dels rols perque observant les partides em vaig
-       adonar que si no ho feia aixi, al final de les partides tenia blocs de 
-       soldats que feien tots el mateix... I vaig decidir que aixo era millor
-    */
-    int role = id % 3;
-
-    // rol 0: farmer (va a per diners)
-    if (role == 0) {
-        if (dist_a_diners[p.i][p.j] != -1) {
-            int best = dist_a_diners[p.i][p.j];
-            bool trobat = false;
-            Dir millorDist = Down;
-            
-            for (Dir d : DIRS) {
-                Pos q = p + d;
-                if (!pos_ok(q)) continue;
-                if (!cella_accessible(q)) continue;
-                if (cell(q).id != -1) continue;
-
-                int dm = dist_a_diners[q.i][q.j];
-                if (dm != -1 && dm < best) {
-                    best = dm;
-                    millorDist = d;
-                    trobat = true;
-                }
-            }
-
-            //
-            if (trobat) {
-                move(id, millorDist);
-                return;
-            }
-        }
-    }
-
-    // rol 1: poisoner (va a per veri)
-    else if (role == 1) {
-        // a) si no estic al màxim de verí i hi ha verí al pot, carregar (IMPORTANT)
-        if (me_u.poison < soldier_max_poisons() && available_poison(me()) > 0) {
-            charge(id);
-            return;
-        }
-
-        // b) intentar anar a poison kits per alimentar el pot
-        if (dist_a_poison_kits[p.i][p.j] != -1) {
-            int best = dist_a_poison_kits[p.i][p.j];
-            Dir millorDist = Down;
-            bool trobat = false;
-
-            for (Dir d : DIRS) {
-                Pos q = p + d;
-                if (!pos_ok(q)) continue;
-                if (!cella_accessible(q)) continue;
-                if (cell(q).id != -1) continue;
-
-                int dp = dist_a_poison_kits[q.i][q.j];
-                if (dp != -1 && dp < best) {
-                    best = dp;
-                    millorDist = d;
-                    trobat = true;
-                }
-            }
-
-            if (trobat) {
-                move(id, millorDist);
-                return;
-            }
-        }
-
-        // c) si ja tenim verí i no hi ha kits a prop, anem cap a enemics
-        if (dist_soldats_enemics[p.i][p.j] > 0) {
-            int best = dist_soldats_enemics[p.i][p.j];
-            Dir millorDist = Down;
-
-            bool trobat = false;
-
-            for (Dir d : DIRS) {
-                Pos q = p + d;
-                if (!pos_ok(q)) continue;
-                if (!cella_accessible(q)) continue;
-                if (cell(q).id != -1) continue; 
-
-                int de = dist_soldats_enemics[q.i][q.j];
-                if (de != -1 && de < best) {
-                    best = de;
-                    millorDist = d;
-                    trobat = true;
-                }
-            }
-
-            if (trobat) {
-                move(id, millorDist);
-                return;
-            }
-        }
-    }
-
-    // rol 2: attacker (va a per enemics)
-    else { 
-        // a) si no tinc verí però n’hi ha al pot, em carrego
-        if (me_u.poison == 0 && available_poison(me()) > 0) {
-            charge(id);
-            return;
-        }
-
-        // b) si no tinc verí i tampoc pot, intento anar a poison kits
-        if (me_u.poison == 0 && dist_a_poison_kits[p.i][p.j] != -1) {
-            int best = dist_a_poison_kits[p.i][p.j];
-            Dir millorDist = Down;
-            bool trobat = false;
-
-            for (Dir d : DIRS) {
-                Pos q = p + d;
-                if (!pos_ok(q)) continue;
-                if (!cella_accessible(q)) continue;
-                if (cell(q).id != -1) continue;
-
-                int dp = dist_a_poison_kits[q.i][q.j];
-                if (dp != -1 && dp < best) {
-                    best = dp;
-                    millorDist = d;
-                    trobat = true;
-                }
-            }
-
-            if (trobat) {
-                move(id, millorDist);
-                return;
-            }
-        }
-
-        // c) si ja tinc verí (o no tinc però tampoc kits), vaig cap a enemics
-        if (dist_soldats_enemics[p.i][p.j] > 0) {
-            bool trobat = false;
-            int best = dist_soldats_enemics[p.i][p.j];
-            Dir millorDist = Down;
-            
-
-            for (Dir d : DIRS) {
-                Pos q = p + d;
-                if (!pos_ok(q)) continue;
-                if (!cella_accessible(q)) continue;
-                if (cell(q).id != -1) continue;
-
-                int de = dist_soldats_enemics[q.i][q.j];
-                if (de != -1 && de < best) {
-                    best = de;
-                    millorDist = d;
-                    trobat = true;
-                }
-            }
-
-            if (trobat) {
-                move(id, millorDist);
-                return;
-            }
-        }
-
-        // d) si no veig enemics, aprofito i farm de diners
-        if (dist_a_diners[p.i][p.j] != -1) {
-            int best = dist_a_diners[p.i][p.j];
-            Dir millorDist = Down;
-            bool trobat = false;
-
-            for (Dir d : DIRS) {
-                Pos q = p + d;
-                if (!pos_ok(q)) continue;
-                if (!cella_accessible(q)) continue;
-                if (cell(q).id != -1) continue;
-
-                int dm = dist_a_diners[q.i][q.j];
-                if (dm != -1 && dm < best) {
-                    best = dm;
-                    millorDist = d;
-                    trobat = true;
-                }
-            }
-
-            if (trobat) {
-                move(id, millorDist);
-                return;
-            }
-        }
-    }
-}
-
-// Walkable cell (si es pot anar a aquella cell)
-bool Mauricio27_0::cella_accessible(const Pos& p) {
-    if (!pos_ok(p)) return false;
-    const Cell& c = cell(p);
-    if(c.type == Wall) return false;
-    return true;
-}
-
-// Per poder fer tots els calculs una vegada per despres fer tots els accessos 
-// en temps O(1)
-void Mauricio27_0::computar_info_global() {
-    dist_a_diners        = bfs_from_multi_pos_money();
-    dist_a_health_kits  = bfs_multi_vida();
-    dist_a_poison_kits  = bfs_multi_veri();
-
-    dist_a_caixes        = bfs_multi_caixes();
-
-    dist_soldats_enemics  = bfs_multi_enemy_soldiers();
-}
-
-// Multi BFS a diners
-vector<vector<int>> Mauricio27_0::bfs_from_multi_pos_money() {
-    vector<vector<int>> dist(board_rows(), vector<int>(board_cols(), -1));
-    queue<Pos> Q;
-
-    for (int i = 0; i < board_rows(); ++i) {
-        for (int j = 0; j < board_cols(); ++j) {
-            if (cell(i,j).money > 0) {
-                dist[i][j] = 0;
-                Q.push(Pos(i,j));
-            }
-        }
-    }
-
-    while (!Q.empty()) {
-        Pos p = Q.front(); Q.pop();
-
-        for (Dir d : DIRS) {
-            Pos q = p + d;
-
-            if (!pos_ok(q)) continue;
-            if (!cella_accessible(q)) continue;       
-            if (dist[q.i][q.j] != -1) continue;    
-
-            dist[q.i][q.j] = dist[p.i][p.j] + 1;
-            Q.push(q);
-        }
-    }
-
-    return dist;
-}
-
-// Multi BFS a caixes
-vector<vector<int>> Mauricio27_0::bfs_multi_caixes() {
-    vector<vector<int>> dist(board_rows(), vector<int>(board_cols(), -1));
-    queue<Pos> Q;
-
-    for (int i = 0; i < board_rows(); ++i)
-        for (int j = 0; j < board_cols(); ++j)
-            if (cell(i,j).box != -1) {
-                dist[i][j] = 0;
-                Q.push(Pos(i,j));
-            }
-
-    while (!Q.empty()) {
-        Pos p = Q.front(); Q.pop();
-
-        for (Dir d : DIRS) {
-            Pos q = p + d;
-            if (!pos_ok(q)) continue;
-            if (!cella_accessible(q)) continue;
-            if (dist[q.i][q.j] != -1) continue;
-
-            dist[q.i][q.j] = dist[p.i][p.j] + 1;
-            Q.push(q);
-        }
-    }
-
-    return dist;
-}
-
-// Multi BFS a kits de vida
-vector<vector<int>> Mauricio27_0::bfs_multi_vida() {
-    vector<vector<int>> dist(board_rows(), vector<int>(board_cols(), -1));
-    queue<Pos> Q;
-
-    for (int i = 0; i < board_rows(); ++i)
-        for (int j = 0; j < board_cols(); ++j)
-            if (cell(i,j).health_kit) {
-                dist[i][j] = 0;
-                Q.push(Pos(i,j));
-            }
-
-    while (!Q.empty()) {
-        Pos p = Q.front(); Q.pop();
-
-        for (Dir d : DIRS) {
-            Pos q = p + d;
-            if (!pos_ok(q)) continue;
-            if (!cella_accessible(q)) continue;
-            if (dist[q.i][q.j] != -1) continue;
-
-            dist[q.i][q.j] = dist[p.i][p.j] + 1;
-            Q.push(q);
-        }
-    }
-
-    return dist;
-}
-
-// Multi BFS kits de veri
-vector<vector<int>> Mauricio27_0::bfs_multi_veri() {
-    vector<vector<int>> dist(board_rows(), vector<int>(board_cols(), -1));
-    queue<Pos> Q;
-
-    for (int i = 0; i < board_rows(); ++i) {
-        for (int j = 0; j < board_cols(); ++j) {
-            if (cell(i,j).poison_kit) {
-                dist[i][j] = 0;
-                Q.push(Pos(i, j));
-            }
-        }
-    }
-
-    while (!Q.empty()) {
-        Pos p = Q.front();
-        Q.pop();
-
-        for (Dir d : DIRS) {
-            Pos q = p + d;
-            if (!pos_ok(q)) continue;
-            if (!cella_accessible(q)) continue; 
-            if (dist[q.i][q.j] != -1) continue; 
-
-            dist[q.i][q.j] = dist[p.i][p.j] + 1;
-            Q.push(q);
-        }
-    }
-
-    return dist;
-}
-
-// Multi BFS a soldats enemics
-vector<vector<int>> Mauricio27_0::bfs_multi_enemy_soldiers() {
-    vector<vector<int>> dist(board_rows(), vector<int>(board_cols(), -1));
-    queue<Pos> Q;
-
-    // Només soldats enemics amb poison > 0 ja que només aquests són realment 
-    // perillosos per al professor
-    for (int pl = 0; pl < num_players(); ++pl) {
-        if (pl == me()) continue;
-        for (int id : soldiers(pl)) {
-            const Unit& u = unit(id);
-            if (u.poison > 0) {  
-                Pos sp = u.pos;
-                dist[sp.i][sp.j] = 0;
-                Q.push(sp);
-            }
-        }
-    }
-
-    while (!Q.empty()) {
-        Pos p = Q.front(); Q.pop();
-        for (Dir d : DIRS) {
-            Pos q = p + d;
-            if (!pos_ok(q)) continue;
-            if (!cella_accessible(q)) continue;
-            if (dist[q.i][q.j] != -1) continue;
-            dist[q.i][q.j] = dist[p.i][p.j] + 1;
-            Q.push(q);
-        }
-    }
-
-    return dist;
-}
-
-
-// Comprovo si (a,b,c) compleixen que son una tripleta valida
-// (que un és suma dels altres dos)
 bool Mauricio27_0::valida(int a, int b, int c) {
     return (a == b + c) || (b == a + c) || (c == a + b);
 }
 
-// Backtracking principal
-// PARAMETRES:
-    // v          : vector de nombres (hints)
-    // sol        : solució parcial, sol[i] = id de la tripleta o -1 si no assignat
-    // trip_id    : id de la tripleta que estem omplint (0, 1, 2, ...)
-    // Retorna true si ha trobat una assignació completa
-// PRE: Un vector de nombres, un vector solucio parcial, i el id de la tripleta
-//      que estem omplint
-// POST: True si hem trobat una assignacio completa, False altrament
 bool Mauricio27_0::backtrack(const vector<int>& v, vector<int>& sol, int trip_id) {
+    int n = static_cast<int>(v.size());
 
-    int n = (int)v.size();
-
-    // Cas base: si no hi ha cap -1, tots estan assignats, per tant tenim exit
     bool complete = true;
     for (int i = 0; i < n; ++i) {
         if (sol[i] == -1) {
@@ -712,7 +376,6 @@ bool Mauricio27_0::backtrack(const vector<int>& v, vector<int>& sol, int trip_id
     }
     if (complete) return true;
 
-    // Cas recursiu: 
     int i = -1;
     for (int idx = 0; idx < n; ++idx) {
         if (sol[idx] == -1) {
@@ -720,47 +383,28 @@ bool Mauricio27_0::backtrack(const vector<int>& v, vector<int>& sol, int trip_id
             break;
         }
     }
+    if (i == -1) return true;
 
-    // Per si acas
-    if (i == -1) return true; 
-
-    // Provem totes les parelles (j, k) que compleixin j < k
     for (int j = i + 1; j < n; ++j) {
         if (sol[j] != -1) continue;
         for (int k = j + 1; k < n; ++k) {
             if (sol[k] != -1) continue;
-
-            int a = v[i];
-            int b = v[j];
-            int c = v[k];
-
-            if (!valida(a, b, c)) continue;
+            if (!valida(v[i], v[j], v[k])) continue;
 
             sol[i] = sol[j] = sol[k] = trip_id;
-
             if (backtrack(v, sol, trip_id + 1)) return true;
-
             sol[i] = sol[j] = sol[k] = -1;
         }
     }
-
-    // Si cap parella (j, k) funciona, no hi ha solució amb aquesta branca i
-    // retornem False
     return false;
 }
 
-
 vector<int> Mauricio27_0::solve_tripletes(const vector<int>& v) {
-    int n = (int)v.size();
-    vector<int> sol(n, -1);
-
-    // Aqui no guardem el retorn de backtrack donat que segons l'enunciat
-    // sempre trobarem una solucio
+    vector<int> sol(v.size(), -1);
+    // The original game guarantees that a solution exists.
     backtrack(v, sol, 0);
-
     return sol;
 }
-
 
 /**
  * Do not modify the following line.
